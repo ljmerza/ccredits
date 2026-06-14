@@ -34,7 +34,8 @@ The tool sums that across all completed sessions in the chosen month.
 
 ## Setup
 
-Install it as an isolated, globally-available `ccredits` command:
+Install it as an isolated, globally-available `ccredits` command (needs
+[`uv`](https://docs.astral.sh/uv/getting-started/installation/)):
 
 ```bash
 uv tool install .
