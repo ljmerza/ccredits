@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ccredits"
+version = "0.1.0"
+description = "Show GitHub Copilot AI credits used per month, read from the Copilot CLI's local session logs."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["rich>=13.0"]
+
+[project.scripts]
+ccredits = "ccredits:main"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["ccredits.py"]
