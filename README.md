@@ -9,7 +9,7 @@ reads the GitHub Copilot CLI's own local session logs under `~/.copilot/session-
 ## Features
 
 - Monthly AI-credit total, plus breakdowns **per day**, **per model**, and **per session**.
-- **Projection** of the full month from your average weekday pace (`--projected`).
+- **Projection** of the full month from your average daily pace (`--projected`), or weekdays only (`--weekdays-only`).
 - **History** of the last N months (`--history`).
 - Pick any month (`--month`), local or UTC boundary (`--utc`), and JSON output (`--json`).
 
@@ -52,11 +52,20 @@ ccredits
 # A specific month
 ccredits --month 2026-05
 
-# Project this month's total from average weekday use
+# Project this month's total from average daily use (weekends included)
 ccredits --projected
 
-# Summary of the last 3 months (or --history 6 for six)
+# ...or project from weekday (Mon-Fri) pace only
+ccredits --projected --weekdays-only
+
+# Summary of the last N months, with month-over-month deltas (default 3)
 ccredits --history
+
+# Track against a monthly budget (or set it in config.toml — see below)
+ccredits --budget 300 --projected
+
+# Override the per-credit cost used for $ estimates (default $0.01)
+ccredits --cost-per-credit 0.01
 
 # UTC month boundary (matches GitHub billing reset); default is local time
 ccredits --utc
@@ -73,11 +82,36 @@ ccredits --session-dir /path/to/.copilot/session-state
 | Flag | Description |
 |------|-------------|
 | `--month YYYY-MM` | Month to report. Default: current month. |
-| `--projected` | Add a projected month total based on average **weekday** use. |
-| `--history [N]` | Add a summary of the last `N` months (default 3). |
+| `--projected` | Add a projected month total based on average use per **calendar day** (weekends included). |
+| `--weekdays-only` | With `--projected`, average over **weekdays (Mon–Fri)** only, excluding weekend usage. |
+| `--history [N]` | Add a summary of the last `N` months (default 3), with month-over-month deltas. |
+| `--budget CREDITS` | Monthly AI-credit budget; shows used/remaining and (with `--projected`) whether you're on track to exceed it. Overrides config. |
+| `--cost-per-credit USD` | Dollar cost per AI credit for cost estimates (default `0.01`). Overrides config. |
+| `--config PATH` | TOML config file. Default: `./config.toml` if present. |
 | `--utc` | Use the UTC calendar month as the boundary (default: local time). |
 | `--json` | Emit JSON instead of tables. |
 | `--session-dir PATH` | Copilot session-state dir. Default: `~/.copilot/session-state`. |
+
+### Config file
+
+Budget and per-credit cost can live in a TOML config so you don't retype them.
+`ccredits` reads `config.toml` from the current directory (or a path given with
+`--config`). Copy the tracked example and edit it — your `config.toml` is gitignored,
+so it never gets committed:
+
+```bash
+cp config.example.toml config.toml
+```
+
+```toml
+# config.toml
+budget = 300            # monthly AI-credit budget (omit to disable budget tracking)
+cost_per_credit = 0.01  # GitHub bills overage AI credits at $0.01 each
+```
+
+Precedence is **CLI flag > config file > built-in default**. Cost estimates appear
+everywhere credits do (summary, history, projection); the **month-over-month delta**
+(current vs previous month) shows in the summary, and per-row deltas show in `--history`.
 
 ### Example output
 
@@ -95,17 +129,21 @@ Per day                          Per model
 
 ## Projection (`--projected`)
 
-Estimates the full month's total assuming you keep using Copilot at your current
-**weekday** pace:
+Estimates the full month's total assuming you keep using Copilot at your current pace.
+By default the average is taken over **every elapsed calendar day**:
 
 ```
-avg_per_weekday = weekday_credits_so_far / weekdays_elapsed_so_far
-projected_total = avg_per_weekday × total_weekdays_in_month
+avg_per_day = credits_so_far / days_elapsed_so_far
+projected_total = avg_per_day × total_days_in_month
 ```
 
-Weekend (Sat/Sun) usage is excluded from the average, and the average is taken over
-*every* elapsed weekday — including weekdays with no usage — so a quiet Tuesday pulls the
-projection down. For a past month it just reports the final actual total.
+The average covers *every* elapsed day — including days with no usage — so a quiet day
+pulls the projection down. For a past month it just reports the final actual total.
+
+Add `--weekdays-only` to base the projection on **weekdays (Mon–Fri)** instead: weekend
+usage is then excluded from the average and the projection spans only the month's
+weekdays. Note that in this mode the projection can read *lower* than what you've already
+spent if much of your usage falls on weekends.
 
 ## History (`--history [N]`)
 

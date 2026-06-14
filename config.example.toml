@@ -1,0 +1,17 @@
+# ccredits configuration — example.
+#
+# Copy this file to `config.toml` (which is gitignored, so your settings stay
+# local) and edit the values. ccredits reads `config.toml` from the current
+# working directory, or pass an explicit path with `--config /path/to/config.toml`.
+#
+# Command-line flags (--budget, --cost-per-credit) always override these values.
+
+# Monthly AI-credit budget, in credits. Remove or comment out to disable budget
+# tracking. With --projected, ccredits also tells you whether you're on track to
+# exceed it. The 300 below is an illustrative placeholder — set your own plan's
+# allowance.
+budget = 300
+
+# Dollar cost per AI credit, used for cost estimates. GitHub bills overage AI
+# credits at $0.01 each.
+cost_per_credit = 0.01

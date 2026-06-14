@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Show GitHub Copilot AI credits used per month, read from the Copilot CLI's local session logs."
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["rich>=13.0"]
+dependencies = [
+    "rich>=13.0",
+    "tomli>=1.1.0; python_version < '3.11'",
+]
 
 [project.scripts]
 ccredits = "ccredits:main"

@@ -25,7 +25,14 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+try:  # tomllib is stdlib on 3.11+; tomli is the backport for 3.9/3.10.
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - depends on interpreter version
+    import tomli as tomllib
+
 NANO_AIU_PER_CREDIT = 1_000_000_000  # CLI constant Ygs=1e9: credits = totalNanoAiu / 1e9
+DEFAULT_COST_PER_CREDIT = 0.01  # GitHub bills overage AI credits at $0.01 each.
+CONFIG_FILENAME = "config.toml"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -56,8 +63,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--projected",
         action="store_true",
-        help="Project this month's total from average daily use, counting only "
-        "weekdays (Mon-Fri). Weekend usage is excluded from the average.",
+        help="Project this month's total from average use per elapsed calendar "
+        "day (weekends included).",
+    )
+    parser.add_argument(
+        "--weekdays-only",
+        action="store_true",
+        help="With --projected, average over weekdays (Mon-Fri) only, excluding "
+        "weekend usage. Default projects over every calendar day.",
     )
     parser.add_argument(
         "--history",
@@ -74,6 +87,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Emit machine-readable JSON instead of tables.",
     )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="TOML config file. Default: ./config.toml in the current directory, "
+        "if present. May set 'budget' and 'cost_per_credit'.",
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        metavar="CREDITS",
+        help="Monthly AI-credit budget. Shows used/remaining and, with "
+        "--projected, whether you're on track to exceed it. Overrides config.",
+    )
+    parser.add_argument(
+        "--cost-per-credit",
+        type=float,
+        default=None,
+        metavar="USD",
+        help="Dollar cost per AI credit for cost estimates "
+        f"(default {DEFAULT_COST_PER_CREDIT}). Overrides config.",
+    )
     return parser.parse_args(argv)
 
 
@@ -86,6 +122,35 @@ def format_credits(credits: float) -> str:
     if 0 < credits < 0.01:
         return "<0.01"
     return f"{credits:.2f}"
+
+
+def format_cost(credits: float, cost_per_credit: float) -> str:
+    """Dollar value of `credits` at the configured per-credit cost."""
+    return f"${credits * cost_per_credit:.2f}"
+
+
+def pct_change(current: float, previous: float) -> float | None:
+    """Percent change from previous to current; None when previous is 0."""
+    if previous == 0:
+        return None
+    return (current - previous) / previous * 100
+
+
+def load_config(config_path: Path | None) -> dict:
+    """Load settings from a TOML config file.
+
+    Looks at an explicit --config path when given, otherwise `config.toml` in
+    the current working directory. Returns {} when no readable config is found,
+    so a missing or malformed file never crashes the tool.
+    """
+    candidate = config_path if config_path is not None else Path.cwd() / CONFIG_FILENAME
+    if not candidate.is_file():
+        return {}
+    try:
+        with candidate.open("rb") as fh:
+            return tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
 
 
 def parse_timestamp(raw: str) -> datetime | None:
@@ -226,6 +291,11 @@ def shift_month(month: str, delta: int) -> str:
     return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
 
 
+def count_days(start: date, end: date) -> int:
+    days = (end - start).days + 1
+    return days if days > 0 else 0
+
+
 def count_weekdays(start: date, end: date) -> int:
     days = (end - start).days + 1
     if days <= 0:
@@ -233,8 +303,13 @@ def count_weekdays(start: date, end: date) -> int:
     return sum(1 for i in range(days) if (start + timedelta(days=i)).weekday() < 5)
 
 
-def project_month(report: dict, use_utc: bool) -> dict:
-    """Project the month's total from average use per *elapsed weekday*."""
+def project_month(report: dict, use_utc: bool, weekdays_only: bool = False) -> dict:
+    """Project the month's total from average use per elapsed period.
+
+    By default the period is every calendar day, so all usage feeds the average.
+    With `weekdays_only`, weekend (Sat/Sun) usage is excluded and the average is
+    taken over Mon-Fri only.
+    """
     month = report["month"]
     first, last = month_bounds(month)
     today = datetime.now(timezone.utc).date() if use_utc else datetime.now().date()
@@ -248,32 +323,72 @@ def project_month(report: dict, use_utc: bool) -> dict:
     else:
         reference = today
 
-    weekday_credits = sum(
-        s["credits"] for s in report["sessions"] if to_zone(s["timestamp"], use_utc).weekday() < 5
-    )
-    weekdays_elapsed = count_weekdays(first, reference)
-    weekdays_total = count_weekdays(first, last)
+    if weekdays_only:
+        used = sum(
+            s["credits"]
+            for s in report["sessions"]
+            if to_zone(s["timestamp"], use_utc).weekday() < 5
+        )
+        elapsed = count_weekdays(first, reference)
+        total_periods = count_weekdays(first, last)
+    else:
+        used = report["total"]
+        elapsed = count_days(first, reference)
+        total_periods = count_days(first, last)
 
-    avg = weekday_credits / weekdays_elapsed if weekdays_elapsed else 0.0
+    avg = used / elapsed if elapsed else 0.0
     return {
-        "weekday_credits": weekday_credits,
-        "weekend_credits": report["total"] - weekday_credits,
-        "weekdays_elapsed": weekdays_elapsed,
-        "weekdays_total": weekdays_total,
-        "avg_per_weekday": avg,
-        "projected_total": avg * weekdays_total,
+        "weekdays_only": weekdays_only,
+        "unit": "weekday" if weekdays_only else "day",
+        "used_credits": used,
+        "excluded_credits": report["total"] - used,
+        "periods_elapsed": elapsed,
+        "periods_total": total_periods,
+        "avg_per_period": avg,
+        "projected_total": avg * total_periods,
         "complete": today > last,
     }
 
 
 def build_history(all_sessions: list[dict], month: str, use_utc: bool, n: int) -> list[dict]:
-    """Totals for the n months ending with `month` (oldest first)."""
+    """Totals for the n months ending with `month` (oldest first).
+
+    Each row carries the month-over-month delta vs the previous row: `delta`
+    (credit change) and `delta_pct` (None for the first row or when the prior
+    month was zero).
+    """
     months = [shift_month(month, -k) for k in range(n - 1, -1, -1)]
     rows = []
+    prev_total: float | None = None
     for m in months:
         agg = aggregate(all_sessions, m, use_utc)
-        rows.append({"month": m, "total": agg["total"], "counted": agg["counted"]})
+        total = agg["total"]
+        delta = None if prev_total is None else total - prev_total
+        delta_pct = None if prev_total is None else pct_change(total, prev_total)
+        rows.append(
+            {
+                "month": m,
+                "total": total,
+                "counted": agg["counted"],
+                "delta": delta,
+                "delta_pct": delta_pct,
+            }
+        )
+        prev_total = total
     return rows
+
+
+def month_over_month(all_sessions: list[dict], month: str, use_utc: bool) -> dict:
+    """Current month vs the immediately preceding month."""
+    prev_month = shift_month(month, -1)
+    current = aggregate(all_sessions, month, use_utc)["total"]
+    previous = aggregate(all_sessions, prev_month, use_utc)["total"]
+    return {
+        "prev_month": prev_month,
+        "prev_total": previous,
+        "delta": current - previous,
+        "delta_pct": pct_change(current, previous),
+    }
 
 
 def collect(session_dir: Path, month: str, use_utc: bool) -> dict:
@@ -292,12 +407,22 @@ def local_str(ts: datetime | None, use_utc: bool) -> str:
     return shown.strftime("%Y-%m-%d %H:%M")
 
 
+def _delta_markup(delta: float, delta_pct: float | None) -> str:
+    """Rich-markup string for a credit delta: red when up, green when down."""
+    arrow = "▲" if delta > 0 else "▼" if delta < 0 else "→"
+    color = "red" if delta > 0 else "green" if delta < 0 else "dim"
+    pct = f"{delta_pct:+.0f}%" if delta_pct is not None else "n/a"
+    return f"[{color}]{arrow} {delta:+.2f} credits ({pct})[/{color}]"
+
+
 def render_rich(report: dict) -> None:
     from rich.console import Console
     from rich.table import Table
 
     console = Console()
     tz_label = "UTC" if report["use_utc"] else "local time"
+
+    cost_per_credit = report["cost_per_credit"]
 
     console.print()
     console.print(
@@ -306,8 +431,17 @@ def render_rich(report: dict) -> None:
     )
     console.print(
         f"[bold green]{format_credits(report['total'])} credits[/bold green] "
-        f"used across {report['counted']} session(s)\n"
+        f"([green]{format_cost(report['total'], cost_per_credit)}[/green]) "
+        f"used across {report['counted']} session(s)"
     )
+    mom = report.get("mom")
+    if mom is not None:
+        console.print(
+            f"  [dim]vs {mom['prev_month']} "
+            f"({format_credits(mom['prev_total'])} credits):[/dim] "
+            f"{_delta_markup(mom['delta'], mom['delta_pct'])}"
+        )
+    console.print()
 
     if report["per_day"]:
         day_table = Table(title="Per day", title_justify="left", header_style="bold")
@@ -344,28 +478,58 @@ def render_rich(report: dict) -> None:
 
     projection = report.get("projection")
     if projection:
-        if projection["weekdays_elapsed"] == 0:
+        unit = projection["unit"]
+        if projection["periods_elapsed"] == 0:
             console.print(
-                "[bold]Projection:[/bold] no elapsed weekdays yet — nothing to project from.\n"
+                f"[bold]Projection:[/bold] no elapsed {unit}s yet — nothing to project from.\n"
             )
         else:
             label = "Final (month complete)" if projection["complete"] else "Projected month total"
             console.print(
                 f"[bold]{label}:[/bold] "
-                f"[bold magenta]{format_credits(projection['projected_total'])} credits[/bold magenta]"
+                f"[bold magenta]{format_credits(projection['projected_total'])} credits[/bold magenta] "
+                f"([magenta]{format_cost(projection['projected_total'], cost_per_credit)}[/magenta])"
             )
             console.print(
-                f"  [dim]{format_credits(projection['avg_per_weekday'])}/weekday avg × "
-                f"{projection['weekdays_total']} weekdays "
-                f"({format_credits(projection['weekday_credits'])} over "
-                f"{projection['weekdays_elapsed']} elapsed weekday(s)).[/dim]"
+                f"  [dim]{format_credits(projection['avg_per_period'])}/{unit} avg × "
+                f"{projection['periods_total']} {unit}s "
+                f"({format_credits(projection['used_credits'])} over "
+                f"{projection['periods_elapsed']} elapsed {unit}(s)).[/dim]"
             )
-            if projection["weekend_credits"] > 0:
+            if projection["excluded_credits"] > 0:
                 console.print(
-                    f"  [dim]Excludes {format_credits(projection['weekend_credits'])} "
+                    f"  [dim]Excludes {format_credits(projection['excluded_credits'])} "
                     "weekend credits from the average.[/dim]"
                 )
             console.print()
+
+    budget = report.get("budget")
+    if budget:
+        used = report["total"]
+        remaining = budget - used
+        used_pct = (used / budget * 100) if budget else 0.0
+        over = used > budget
+        used_color = "red" if over else "yellow" if used_pct >= 80 else "green"
+        console.print(
+            f"[bold]Budget:[/bold] [{used_color}]{format_credits(used)} / "
+            f"{format_credits(budget)} credits ({used_pct:.0f}%)[/{used_color}] — "
+            f"[dim]{format_credits(abs(remaining))} "
+            f"{'over' if over else 'remaining'} "
+            f"({format_cost(abs(remaining), cost_per_credit)})[/dim]"
+        )
+        projection = report.get("projection")
+        if projection and projection["periods_elapsed"] > 0:
+            projected = projection["projected_total"]
+            proj_over = projected > budget
+            proj_color = "red" if proj_over else "green"
+            verb = "exceed" if proj_over else "stay under"
+            diff = abs(projected - budget)
+            console.print(
+                f"  [{proj_color}]Projected to {verb} budget by "
+                f"{format_credits(diff)} credits "
+                f"({format_cost(diff, cost_per_credit)}).[/{proj_color}]"
+            )
+        console.print()
 
     history = report.get("history")
     if history:
@@ -375,15 +539,28 @@ def render_rich(report: dict) -> None:
         hist_table.add_column("Month")
         hist_table.add_column("Sessions", justify="right")
         hist_table.add_column("Credits", justify="right")
+        hist_table.add_column("Cost", justify="right")
+        hist_table.add_column("Δ vs prev", justify="right")
         for row in history:
+            if row["delta"] is None:
+                delta_cell = "[dim]—[/dim]"
+            else:
+                delta_cell = _delta_markup(row["delta"], row["delta_pct"])
             hist_table.add_row(
-                row["month"], str(row["counted"]), format_credits(row["total"])
+                row["month"],
+                str(row["counted"]),
+                format_credits(row["total"]),
+                format_cost(row["total"], cost_per_credit),
+                delta_cell,
             )
         hist_table.add_section()
+        hist_total = sum(r["total"] for r in history)
         hist_table.add_row(
             "[bold]Total[/bold]",
             str(sum(r["counted"] for r in history)),
-            f"[bold]{format_credits(sum(r['total'] for r in history))}[/bold]",
+            f"[bold]{format_credits(hist_total)}[/bold]",
+            f"[bold]{format_cost(hist_total, cost_per_credit)}[/bold]",
+            "",
         )
         console.print(hist_table)
 
@@ -403,10 +580,13 @@ def render_rich(report: dict) -> None:
 
 
 def render_json(report: dict) -> None:
+    cost_per_credit = report["cost_per_credit"]
     out = {
         "month": report["month"],
         "timezone": "utc" if report["use_utc"] else "local",
         "total_credits": round(report["total"], 6),
+        "cost_per_credit": cost_per_credit,
+        "total_cost": round(report["total"] * cost_per_credit, 6),
         "counted_sessions": report["counted"],
         "incomplete_sessions": report["incomplete"],
         "unreadable_sessions": report["unreadable"],
@@ -423,21 +603,49 @@ def render_json(report: dict) -> None:
             for s in report["sessions"]
         ],
     }
+    mom = report.get("mom")
+    if mom is not None:
+        out["month_over_month"] = {
+            "prev_month": mom["prev_month"],
+            "prev_total_credits": round(mom["prev_total"], 6),
+            "delta_credits": round(mom["delta"], 6),
+            "delta_pct": round(mom["delta_pct"], 2) if mom["delta_pct"] is not None else None,
+        }
+    budget = report.get("budget")
+    if budget:
+        used = report["total"]
+        out["budget"] = {
+            "budget_credits": budget,
+            "used_credits": round(used, 6),
+            "remaining_credits": round(budget - used, 6),
+            "used_pct": round(used / budget * 100, 2) if budget else None,
+            "over_budget": used > budget,
+            "budget_cost": round(budget * cost_per_credit, 6),
+        }
     projection = report.get("projection")
     if projection:
         out["projection"] = {
+            "basis": "weekdays" if projection["weekdays_only"] else "calendar_days",
             "projected_total_credits": round(projection["projected_total"], 6),
-            "avg_per_weekday": round(projection["avg_per_weekday"], 6),
-            "weekday_credits": round(projection["weekday_credits"], 6),
-            "weekend_credits": round(projection["weekend_credits"], 6),
-            "weekdays_elapsed": projection["weekdays_elapsed"],
-            "weekdays_total": projection["weekdays_total"],
+            "projected_total_cost": round(projection["projected_total"] * cost_per_credit, 6),
+            "avg_per_period": round(projection["avg_per_period"], 6),
+            "used_credits": round(projection["used_credits"], 6),
+            "excluded_credits": round(projection["excluded_credits"], 6),
+            "periods_elapsed": projection["periods_elapsed"],
+            "periods_total": projection["periods_total"],
             "month_complete": projection["complete"],
         }
     history = report.get("history")
     if history is not None:
         out["history"] = [
-            {"month": r["month"], "credits": round(r["total"], 6), "sessions": r["counted"]}
+            {
+                "month": r["month"],
+                "credits": round(r["total"], 6),
+                "cost": round(r["total"] * cost_per_credit, 6),
+                "sessions": r["counted"],
+                "delta_credits": round(r["delta"], 6) if r["delta"] is not None else None,
+                "delta_pct": round(r["delta_pct"], 2) if r["delta_pct"] is not None else None,
+            }
             for r in history
         ]
     print(json.dumps(out, indent=2))
@@ -445,6 +653,16 @@ def render_json(report: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    config = load_config(Path(args.config).expanduser() if args.config else None)
+
+    # Precedence: CLI flag > config file > built-in default.
+    budget = args.budget if args.budget is not None else config.get("budget")
+    cost_per_credit = (
+        args.cost_per_credit
+        if args.cost_per_credit is not None
+        else config.get("cost_per_credit", DEFAULT_COST_PER_CREDIT)
+    )
+
     session_dir = Path(args.session_dir).expanduser()
 
     if not session_dir.is_dir():
@@ -460,9 +678,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     report = collect(session_dir, args.month, args.utc)
+    report["cost_per_credit"] = cost_per_credit
+    report["budget"] = budget
+    report["mom"] = month_over_month(report["_all_sessions"], args.month, args.utc)
 
     if args.projected:
-        report["projection"] = project_month(report, args.utc)
+        report["projection"] = project_month(report, args.utc, args.weekdays_only)
     if args.history is not None:
         n = max(1, args.history)
         report["history"] = build_history(report["_all_sessions"], args.month, args.utc, n)
