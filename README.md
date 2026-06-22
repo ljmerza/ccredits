@@ -8,7 +8,7 @@ reads the GitHub Copilot CLI's own local session logs under `~/.copilot/session-
 
 ## Features
 
-- Monthly AI-credit total, plus breakdowns **per day**, **per model**, and **per session**.
+- Monthly AI-credit total, plus breakdowns **per day** and **per model** (add a **per session** breakdown with `--sessions`).
 - **Projection** of the full month from your average daily pace (`--projected`), or weekdays only (`--weekdays-only`).
 - **History** of the last N months (`--history`).
 - Pick any month (`--month`), local or UTC boundary (`--utc`), and JSON output (`--json`).
@@ -71,6 +71,9 @@ ccredits --cost-per-credit 0.01
 # UTC month boundary (matches GitHub billing reset); default is local time
 ccredits --utc
 
+# Add the per-session breakdown (off by default)
+ccredits --sessions
+
 # Machine-readable output
 ccredits --json
 
@@ -90,7 +93,8 @@ ccredits --session-dir /path/to/.copilot/session-state
 | `--cost-per-credit USD` | Dollar cost per AI credit for cost estimates (default `0.01`). Overrides config. |
 | `--config PATH` | TOML config file. Default: `./config.toml` if present. |
 | `--utc` | Use the UTC calendar month as the boundary (default: local time). |
-| `--json` | Emit JSON instead of tables. |
+| `--sessions` | Add a per-session breakdown (repo, model, credits per session). Off by default. |
+| `--json` | Emit JSON instead of tables. The `sessions` array is included only with `--sessions`. |
 | `--session-dir PATH` | Copilot session-state dir. Default: `~/.copilot/session-state`. |
 
 ### Config file

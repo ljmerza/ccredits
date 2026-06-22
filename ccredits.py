@@ -83,6 +83,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(default 3 when the flag is given).",
     )
     parser.add_argument(
+        "--sessions",
+        action="store_true",
+        help="Add a per-session breakdown (each session's repo, model, and "
+        "credits). Off by default; the summary, per-day and per-model views "
+        "always show.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON instead of tables.",
@@ -459,7 +466,7 @@ def render_rich(report: dict) -> None:
             model_table.add_row(model, format_credits(credits))
         console.print(model_table)
 
-    if report["sessions"]:
+    if report.get("show_sessions") and report["sessions"]:
         sess_table = Table(title="Per session", title_justify="left", header_style="bold")
         sess_table.add_column("Started")
         sess_table.add_column("Repo")
@@ -592,7 +599,9 @@ def render_json(report: dict) -> None:
         "unreadable_sessions": report["unreadable"],
         "per_day": {d: round(c, 6) for d, c in report["per_day"].items()},
         "per_model": {m: round(c, 6) for m, c in report["per_model"].items()},
-        "sessions": [
+    }
+    if report.get("show_sessions"):
+        out["sessions"] = [
             {
                 "session_id": s["session_id"],
                 "started": s["timestamp"].isoformat() if s["timestamp"] else None,
@@ -601,8 +610,7 @@ def render_json(report: dict) -> None:
                 "credits": round(s["credits"], 6),
             }
             for s in report["sessions"]
-        ],
-    }
+        ]
     mom = report.get("mom")
     if mom is not None:
         out["month_over_month"] = {
@@ -681,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     report["cost_per_credit"] = cost_per_credit
     report["budget"] = budget
     report["mom"] = month_over_month(report["_all_sessions"], args.month, args.utc)
+    report["show_sessions"] = args.sessions
 
     if args.projected:
         report["projection"] = project_month(report, args.utc, args.weekdays_only)
